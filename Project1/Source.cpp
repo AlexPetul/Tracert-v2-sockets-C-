@@ -20,7 +20,7 @@
 #define DEF_PACKET_SIZE	   32
 #define MAX_PACKET       1024
 
-//заголовок сетевого уровня (IP)
+//IP HEADER
 typedef struct iphdr
 {
 	unsigned int   h_len : 4;        // Length of the header
@@ -36,7 +36,7 @@ typedef struct iphdr
 	unsigned int   destIP;         // Destination IP
 } IpHeader;
 
-//заголовок ICMP
+//ICMP HEADER
 typedef struct icmphdr
 {
 	byte   i_type;              // ICMP message type
@@ -60,7 +60,7 @@ int set_ttl(SOCKET s, int nTimeToLive)
 
 auto begin = std::chrono::steady_clock::now();
 auto end = std::chrono::steady_clock::now();
-/*декодируем IP пакет чтобы определить данные в ICMP пакете*/
+/*decoding IP header to locate ICMP data*/
 int decode_resp(char *buf, int bytes, SOCKADDR_IN *from, int ttl)
 {
 	IpHeader *iphdr = NULL;
@@ -80,7 +80,7 @@ int decode_resp(char *buf, int bytes, SOCKADDR_IN *from, int ttl)
 	auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin);
 	switch (icmphdr->i_type)
 	{
-	case ICMP_ECHOREPLY: //если ответил конечный роутер
+	case ICMP_ECHOREPLY: //destination response
 		lpHostent = gethostbyaddr((const char *)&from->sin_addr, AF_INET, sizeof(struct in_addr));
 		if (WSAGetLastError() != 0) {
 			std::cout << ttl << '\t' << ms.count() << "ms \t" << inet_ntoa(inaddr) << '\n';
@@ -90,7 +90,7 @@ int decode_resp(char *buf, int bytes, SOCKADDR_IN *from, int ttl)
 			std::cout << ttl << '\t' << ms.count() << "ms \t" << lpHostent->h_name << '[' << inet_ntoa(inaddr) << ']' << '\n';
 		return 1;
 		break;
-	case ICMP_TIMEOUT:  //промежуточный
+	case ICMP_TIMEOUT:  //along the way response
 		lpHostent = gethostbyaddr((const char *)&from->sin_addr, AF_INET, sizeof(struct in_addr));
 		if (WSAGetLastError() != 0) {
 			std::cout << ttl << '\t' << ms.count() << "ms \t" << inet_ntoa(inaddr) << '\n';
@@ -99,7 +99,7 @@ int decode_resp(char *buf, int bytes, SOCKADDR_IN *from, int ttl)
 			std::cout << ttl << '\t' << ms.count() << "ms \t" << lpHostent->h_name << '[' << inet_ntoa(inaddr) << ']' << '\n';
 		return 0;
 		break;
-	case ICMP_DESTUNREACH:  //если маршрутизатор недостижим
+	case ICMP_DESTUNREACH:  //if we cant reach the host
 		std::cout << "Host is unreachable " << ttl << "\t" << inet_ntoa(inaddr);
 		return 1;
 		break;
@@ -136,20 +136,20 @@ void fill_icmp_data(char * icmp_data, int datasize)
 int main(int argc, char **argv)
 {
 	WSADATA wsd;
-	//инициализируем библиотеку
+	//initializing library
 	if (WSAStartup(MAKEWORD(2, 2), &wsd) != 0)
 	{
 		std::cout << "WSAStartup() failed:" << GetLastError();
 		return -1;
 	}
-	//создаем сырой сокет
+	//creating raw socket
 	SOCKET sockRaw = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
 	if (sockRaw == INVALID_SOCKET)
 	{
 		std::cout << "WSASocket() failed : " << WSAGetLastError();
 		ExitProcess(-1);
 	}
-	//устанавливаем тайм-аут для входящих запросов
+	//setting timeout for receives
 	int timeout = 1000;
 	int ret = setsockopt(sockRaw, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
 	if (ret == SOCKET_ERROR)
@@ -157,10 +157,10 @@ int main(int argc, char **argv)
 		std::cout << "setsockopt(SO_RCVTIMEO) failed: " << WSAGetLastError();
 		return -1;
 	}
-	//Проверяем существует ли указанный хост/адрес
 	SOCKADDR_IN Destinition, from;
 	ZeroMemory(&Destinition, sizeof(Destinition));
 	Destinition.sin_family = AF_INET;
+	//check if the host/ip is valid
 	if ((Destinition.sin_addr.s_addr = inet_addr(argv[1])) == INADDR_NONE)
 	{
 		HOSTENT *isHostExists = gethostbyname(argv[1]);
@@ -172,8 +172,7 @@ int main(int argc, char **argv)
 			ExitProcess(-1);
 		}
 	}
-	/*устанавливаем размер пакета данных (32 байта)
-	и выделяем память под отправляющий и принимающий буфер для ICMP пакетов*/
+	/* Set data size for ICMP packet and allocate the sending and receiving buffers for ICMP packets*/
 	int datasize = DEF_PACKET_SIZE;
 	char *icmp_data = (char*)malloc(MAX_PACKET);
 	char *recvbuf = (char*)malloc(MAX_PACKET);
@@ -182,7 +181,7 @@ int main(int argc, char **argv)
 		std::cout << "malloc() failed : " << GetLastError();
 		return -1;
 	}  
-	//создаем и заполняем заголовок ICMP
+	//creating and filling in an ICMP header
 	memset(icmp_data, 0, MAX_PACKET);
 	fill_icmp_data(icmp_data, datasize);
 
@@ -192,16 +191,15 @@ int main(int argc, char **argv)
 	for (int ttl = 1; ((ttl <= MAX_HOPS) && (!done)); ttl++)
 	{	
 		begin = std::chrono::steady_clock::now();
-		//устанавливаем ttl на сокет
+		//setting ttl on socket
 		set_ttl(sockRaw, ttl);
 
 		((IcmpHeader*)icmp_data)->i_cksum = 0;
 		((IcmpHeader*)icmp_data)->timestamp = GetTickCount();
 		((IcmpHeader*)icmp_data)->i_seq = seq_no++;
-		//считаем контрольную сумму для заголовка ICMP 
 		((IcmpHeader*)icmp_data)->i_cksum = checksum((unsigned short*)icmp_data, datasize);
 
-		//отправляем ICMP пакет до конечного маршрутизатора
+		//sending the ICMP packet to destination
 		int bwrote = sendto(sockRaw, icmp_data, datasize, 0, (SOCKADDR *)&Destinition, sizeof(Destinition));
 		if (bwrote == SOCKET_ERROR)
 		{
@@ -213,8 +211,8 @@ int main(int argc, char **argv)
 			std::cout << "sendto() failed: \n" << WSAGetLastError();
 			return -1;
 		}
-		//принимаем отправленный от промежуточного или конечного маршрутизатора пакет
 		int fromlen = sizeof(SOCKADDR_IN);
+		//read a packet back from the router
 		ret = recvfrom(sockRaw, recvbuf, MAX_PACKET, 0, (struct sockaddr*)&from, &fromlen);
 		if (ret == SOCKET_ERROR)
 		{
@@ -226,7 +224,7 @@ int main(int argc, char **argv)
 			std::cout << "recvfrom() failed: \n" << WSAGetLastError();
 			return -1;
 		}
-		//определяем, дошли ли мы до конечного маршрутизатора
+		//check if we got to the destination
 		done = decode_resp(recvbuf, ret, &from, ttl);	
 		Sleep(100);
 	}
